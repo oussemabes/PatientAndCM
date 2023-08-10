@@ -1,3 +1,4 @@
+
 import asyncio
 
 import json
@@ -156,7 +157,7 @@ class PatientAgent(AriesAgent):
 
                 "medical_ref": "1111111",
 
-                "consent": "True",
+                "consent": "1",
 
             }
 
@@ -191,7 +192,7 @@ class PatientAgent(AriesAgent):
                 "trace": exchange_tracing,
 
             }
-
+            print(offer_request)
             return offer_request
 
  
@@ -206,7 +207,7 @@ class PatientAgent(AriesAgent):
 
                     "medical_ref": "1111111",
 
-                    "consent": "True",
+                    "consent": "1",
 
                 }
 
@@ -290,7 +291,7 @@ class PatientAgent(AriesAgent):
 
                                     "medical_ref": "1111111",
 
-                                    "consent": "True",
+                                    "consent": "1",
 
                                 },
 
@@ -320,19 +321,19 @@ class PatientAgent(AriesAgent):
 
  
 
+    #####################
+
     def generate_proof_request_web_request(
 
         self, aip, cred_type, revocation, exchange_tracing, connectionless=False
 
     ):
 
-       
-
         if aip == 10:
 
             if revocation:
 
-                req_attrs = [
+                req_attrs=[
 
                     {
 
@@ -352,7 +353,7 @@ class PatientAgent(AriesAgent):
 
                     {
 
-                        "name": "consnet",
+                        "name": "consent",
 
                         "restrictions": [{"schema_name": "consent schema"}],
 
@@ -380,7 +381,7 @@ class PatientAgent(AriesAgent):
 
                 })
 
-               
+           
 
             if SELF_ATTESTED:
 
@@ -400,15 +401,17 @@ class PatientAgent(AriesAgent):
 
                     "name": "consent",
 
-                    "f_type": "==",
+                    "p_type": ">",
 
-                    "f_value": "True",
+                    "p_value": int("0"),
 
                     "restrictions": [{"schema_name": "consent schema"}],
 
                 }
 
             ]
+
+            #proof in the wallet
 
             indy_proof_request = {
 
@@ -418,13 +421,13 @@ class PatientAgent(AriesAgent):
 
                 "requested_attributes": {
 
-                    f"{req_attr['name']}": req_attr for req_attr in req_attrs
+                    f"0_{req_attr['name']}_uuid": req_attr for req_attr in req_attrs
 
                 },
 
                 "requested_predicates": {
 
-                    f"{req_pred['name']}": req_pred for req_pred in req_preds
+                    f"0_{req_pred['name']}_GE_uuid": req_pred for req_pred in req_preds
 
                 },
 
@@ -449,14 +452,278 @@ class PatientAgent(AriesAgent):
             if not connectionless:
 
                 proof_request_web_request["connection_id"] = self.connection_id
-
+            
+            print(proof_request_web_request)
             return proof_request_web_request
 
-   
+ 
+
+        elif aip == 20:
+
+            if cred_type == CRED_FORMAT_INDY:
+
+                if revocation:
+
+                    req_attrs=[
+
+                        {
+
+                            "name": "consent",
+
+                            "restrictions": [{"schema_name": "consent schema"}],
+
+                            "non_revoked": {"to": int(time.time() - 1)},
+
+                        },
+
+                    ]
+
+                else:
+
+                    req_attrs = [
+
+                    {
+
+                        "name": "consent",
+
+                        "restrictions": [{"schema_name": "consent schema"}],
+
+                    }
+
+                ]
+
+                req_attrs.append(
+
+                {
+
+                    "name": "patient_ref",
+
+                    "restrictions": [{"schema_name": "consent schema"}],
+
+                })
+
+                req_attrs.append(
+
+                {
+
+                    "name": "medical_ref",
+
+                    "restrictions": [{"schema_name": "consent schema"}],
+
+                })
+
+                   
+
+                if SELF_ATTESTED:
+
+                    # test self-attested claims
+
+                    req_attrs.append(
+
+                        {"name": "self_attested_thing"},
+
+                    )
+
+                req_preds = [
+
+                    # test zero-knowledge proofs
+
+                    {
+
+                        "name": "consent",
+
+                        "p_type": ">",
+
+                        "p_value": int("0"),
+
+                        "restrictions": [{"schema_name": "consent schema"}],
+
+                    }
+
+                ]
+
+                indy_proof_request = {
+
+                    "name": "Proof of Consent",
+
+                    "version": "1.0",
+
+                    "requested_attributes": {
+
+                        f"0_{req_attr['name']}_uuid": req_attr for req_attr in req_attrs
+
+                    },
+
+                    "requested_predicates": {
+
+                        f"0_{req_pred['name']}_GE_uuid": req_pred
+
+                        for req_pred in req_preds
+
+                    },
+
+                }
+
+ 
+
+                if revocation:
+
+                    indy_proof_request["non_revoked"] = {"to": int(time.time())}
+
+ 
+
+                proof_request_web_request = {
+
+                    "presentation_request": {"indy": indy_proof_request},
+
+                    "trace": exchange_tracing,
+
+                }
+
+                if not connectionless:
+
+                    proof_request_web_request["connection_id"] = self.connection_id
+                
+                print(proof_request_web_request)
+                return proof_request_web_request
+
+ 
+
+            elif cred_type == CRED_FORMAT_JSON_LD:
+
+                proof_request_web_request = {
+
+                    "comment": "test proof request for json-ld",
+
+                    "presentation_request": {
+
+                        "dif": {
+
+                            "options": {
+
+                                "challenge": "3fa85f64-5717-4562-b3fc-2c963f66afa7",
+
+                                "domain": "4jt78h47fh47",
+
+                            },
+
+                            "presentation_definition": {
+
+                                "id": "32f54163-7166-48f1-93d8-ff217bdb0654",
+
+                                "format": {"ldp_vp": {"proof_type": [SIG_TYPE_BLS]}},
+
+                                "input_descriptors": [
+
+                                    {
+
+                                        "id": "citizenship_input_1",
+
+                                        "name": "EU Driver's License",
+
+                                        "schema": [
+
+                                            {
+
+                                                "uri": "https://www.w3.org/2018/credentials#VerifiableCredential"
+
+                                            },
+
+                                            {
+
+                                                "uri": "https://w3id.org/citizenship#PermanentResident"
+
+                                            },
+
+                                        ],
+
+                                        "constraints": {
+
+                                            "limit_disclosure": "required",
+
+                                            "is_holder": [
+
+                                                {
+
+                                                    "directive": "required",
+
+                                                    "field_id": [
+
+                                                        "1f44d55f-f161-4938-a659-f8026467f126"
+
+                                                    ],
+
+                                                }
+
+                                            ],
+
+                                            "fields": [
+
+                                                {
+
+                                                    "id": "1f44d55f-f161-4938-a659-f8026467f126",
+
+                                                    "path": [
+
+                                                        "$.credentialSubject.familyName"
+
+                                                    ],
+
+                                                    "purpose": "The claim must be from one of the specified person",
+
+                                                    "filter": {"const": "SMITH"},
+
+                                                },
+
+                                                {
+
+                                                    "path": [
+
+                                                        "$.credentialSubject.givenName"
+
+                                                    ],
+
+                                                    "purpose": "The claim must be from one of the specified person",
+
+                                                },
+
+                                            ],
+
+                                        },
+
+                                    }
+
+                                ],
+
+                            },
+
+                        }
+
+                    },
+
+                }
+
+                if not connectionless:
+
+                    proof_request_web_request["connection_id"] = self.connection_id
+                print(proof_request_web_request)
+                return proof_request_web_request
+
+ 
+
+            else:
+
+                raise Exception(f"Error invalid credential type: {self.cred_type}")
+
+ 
 
         else:
 
             raise Exception(f"Error invalid AIP level: {self.aip}")
+
+ 
+
+    ######################
 
  
 

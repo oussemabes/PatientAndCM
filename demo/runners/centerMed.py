@@ -1,13 +1,3 @@
-import random
-
- 
-
-from datetime import date
-
-from uuid import uuid4
-
- 
-
 import asyncio
 
 import json
@@ -18,17 +8,19 @@ import os
 
 import sys
 
+import time
+
+import datetime
+
+ 
+
 from aiohttp import ClientError
 
- 
-
-TAILS_FILE_COUNT = int(os.getenv("TAILS_FILE_COUNT", 100))
-
-CRED_PREVIEW_TYPE = "https://didcomm.org/issue-credential/2.0/credential-preview"
+from qrcode import QRCode
 
  
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # noqa
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
  
 
@@ -42,15 +34,21 @@ from runners.agent_container import (  # noqa:E402
 
 )
 
-from runners.support.utils import (  # noqa:E402
+from runners.support.agent import (  # noqa:E402
 
-    check_requires,
+    CRED_FORMAT_INDY,
+
+    CRED_FORMAT_JSON_LD,
+
+    SIG_TYPE_BLS,
+
+)
+
+from runners.support.utils import (  # noqa:E402
 
     log_msg,
 
     log_status,
-
-    log_timer,
 
     prompt,
 
@@ -88,6 +86,10 @@ class CenterMedAgent(AriesAgent):
 
         no_auto: bool = False,
 
+        endorser_role: str = None,
+
+        revocation: bool = False,
+
         **kwargs,
 
     ):
@@ -104,6 +106,10 @@ class CenterMedAgent(AriesAgent):
 
             no_auto=no_auto,
 
+            endorser_role=endorser_role,
+
+            revocation=revocation,
+
             **kwargs,
 
         )
@@ -113,6 +119,10 @@ class CenterMedAgent(AriesAgent):
         self._connection_ready = None
 
         self.cred_state = {}
+
+        # TODO define a dict to hold credential attributes
+
+        # based on cred_def_id
 
         self.cred_attrs = {}
 
@@ -134,173 +144,583 @@ class CenterMedAgent(AriesAgent):
 
  
 
-    async def handle_oob_invitation(self, message):
+    def generate_credential_offer(self, aip, cred_type, cred_def_id, exchange_tracing):
 
-        pass
+        if aip == 10:
 
- 
+            # define attributes to send for credential
 
-    async def handle_connections(self, message):
+            self.cred_attrs[cred_def_id] = {
 
-        print(
+                "patient_ref": "123123123",
 
-            self.ident, "handle_connections", message["state"], message["rfc23_state"]
+                "medical_ref": "1111111",
 
-        )
+                "consent": "1",
 
-        conn_id = message["connection_id"]
-
-        if (not self.connection_id) and message["rfc23_state"] == "invitation-sent":
-
-            print(self.ident, "set connection id", conn_id)
-
-            self.connection_id = conn_id
-
-        if (
-
-            message["connection_id"] == self.connection_id
-
-            and message["rfc23_state"] == "completed"
-
-            and (self._connection_ready and not self._connection_ready.done())
-
-        ):
-
-            self.log("Connected")
-
-            self._connection_ready.set_result(True)
+            }
 
  
 
-    async def handle_issue_credential_v2_0(self, message):
+            cred_preview = {
 
-        state = message["state"]
+                "@type": CRED_PREVIEW_TYPE,
 
-        cred_ex_id = message["cred_ex_id"]
+                "attributes": [
 
-        prev_state = self.cred_state.get(cred_ex_id)
+                    {"name": n, "value": v}
 
-        if prev_state == state:
+                    for (n, v) in self.cred_attrs[cred_def_id].items()
 
-            return  # ignore
+                ],
 
-        self.cred_state[cred_ex_id] = state
+            }
 
- 
+            offer_request = {
 
-        self.log(f"Credential: state = {state}, cred_ex_id = {cred_ex_id}")
+                "connection_id": self.connection_id,
 
- 
+                "cred_def_id": cred_def_id,
 
-        if state == "request-received":
+                "comment": f"Offer on cred def id {cred_def_id}",
 
-            # issue credentials based on offer preview in cred ex record
+                "auto_remove": False,
 
-            if not message.get("auto_issue"):
+                "credential_preview": cred_preview,
 
-                await self.admin_POST(
+                "trace": exchange_tracing,
 
-                    f"/issue-credential-2.0/records/{cred_ex_id}/issue",
+            }
 
-                    {"comment": f"Issuing credential, exchange {cred_ex_id}"},
-
-                )
+            return offer_request
 
  
 
-    async def handle_issue_credential_v2_0_indy(self, message):
+        elif aip == 20:
 
-        pass  # employee id schema does not support revocation
+            if cred_type == CRED_FORMAT_INDY:
 
- 
+                self.cred_attrs[cred_def_id] = {
 
-    async def handle_present_proof_v2_0(self, message):
+                    "patient_ref": "123123123",
 
-        state = message["state"]
+                    "medical_ref": "1111111",
 
-        pres_ex_id = message["pres_ex_id"]
+                    "consent": "1",
 
-        self.log(f"Presentation: state = {state}, pres_ex_id = {pres_ex_id}")
-
- 
-
-        if state == "presentation-received":
-
-            log_status("#27 Process the proof provided by X")
-
-            log_status("#28 Check if proof is valid")
-
-            proof = await self.admin_POST(
-
-                f"/present-proof-2.0/records/{pres_ex_id}/verify-presentation"
-
-            )
-
-            self.log("Proof = ", proof["verified"])
+                }
 
  
 
-            # if presentation is a consent schema (proof of consent),
+                cred_preview = {
 
-            # check values received
+                    "@type": CRED_PREVIEW_TYPE,
 
-            pres_req = message["by_format"]["pres_request"]["indy"]
+                    "attributes": [
 
-            pres = message["by_format"]["pres"]["indy"]
+                        {"name": n, "value": v}
 
-            is_proof_of_education = (
+                        for (n, v) in self.cred_attrs[cred_def_id].items()
 
-                pres_req["name"] == "Proof of Education"
+                    ],
 
-            )
+                }
 
-            if is_proof_of_education:
+                offer_request = {
 
-                log_status("#28.1 Received proof of education, check claims")
+                    "connection_id": self.connection_id,
 
-                for (referent, attr_spec) in pres_req["requested_attributes"].items():
+                    "comment": f"Offer on cred def id {cred_def_id}",
 
-                    if referent in pres['requested_proof']['revealed_attrs']:
+                    "auto_remove": False,
 
-                        self.log(
+                    "credential_preview": cred_preview,
 
-                            f"{attr_spec['name']}: "
+                    "filter": {"indy": {"cred_def_id": cred_def_id}},
 
-                            f"{pres['requested_proof']['revealed_attrs'][referent]['raw']}"
+                    "trace": exchange_tracing,
 
-                        )
+                }
 
-                    else:
+                return offer_request
 
-                        self.log(
+ 
 
-                            f"{attr_spec['name']}: "
+            elif cred_type == CRED_FORMAT_JSON_LD:
 
-                            "(attribute not revealed)"
+                offer_request = {
 
-                        )
+                    "connection_id": self.connection_id,
 
-                for id_spec in pres["identifiers"]:
+                    "filter": {
 
-                    # just print out the schema/cred def id's of presented claims
+                        "ld_proof": {
 
-                    self.log(f"schema_id: {id_spec['schema_id']}")
+                            "credential": {
 
-                    self.log(f"cred_def_id {id_spec['cred_def_id']}")
+                                "@context": [
 
-                # TODO placeholder for the next step
+                                    "https://www.w3.org/2018/credentials/v1",
+
+                                    "https://w3id.org/citizenship/v1",
+
+                                    "https://w3id.org/security/bbs/v1",
+
+                                ],
+
+                                "type": [
+
+                                    "VerifiableCredential",
+
+                                    "PermanentResident",
+
+                                ],
+
+                                "id": "https://credential.example.com/residents/1234567890",
+
+                                "issuer": self.did,
+
+                                "issuanceDate": "2020-01-01T12:00:00Z",
+
+                                "credentialSubject": {
+
+                                    "type": ["PermanentResident"],
+
+                                    "patient_ref": "123123123",
+
+                                    "medical_ref": "1111111",
+
+                                    "consent": "1",
+
+                                },
+
+                            },
+
+                            "options": {"proofType": SIG_TYPE_BLS},
+
+                        }
+
+                    },
+
+                }
+
+                return offer_request
+
+ 
 
             else:
 
-                # in case there are any other kinds of proofs received
-
-                self.log("#28.1 Received ", pres_req["name"])
+                raise Exception(f"Error invalid credential type: {self.cred_type}")
 
  
 
-    async def handle_basicmessages(self, message):
+        else:
 
-        self.log("Received message:", message["content"])
+            raise Exception(f"Error invalid AIP level: {self.aip}")
+
+ 
+
+    #####################
+
+    def generate_proof_request_web_request(
+
+        self, aip, cred_type, revocation, exchange_tracing, connectionless=False
+
+    ):
+
+        if aip == 10:
+
+            if revocation:
+
+                req_attrs=[
+
+                    {
+
+                        "name": "consent",
+
+                        "restrictions": [{"schema_name": "consent schema"}],
+
+                        "non_revoked": {"to": int(time.time() - 1)},
+
+                    },
+
+                ]
+
+            else:
+
+                req_attrs = [
+
+                    {
+
+                        "name": "consent",
+
+                        "restrictions": [{"schema_name": "consent schema"}],
+
+                    }
+
+                ]
+
+                req_attrs.append(
+
+                {
+
+                    "name": "patient_ref",
+
+                    "restrictions": [{"schema_name": "consent schema"}],
+
+                })
+
+                req_attrs.append(
+
+                {
+
+                    "name": "medical_ref",
+
+                    "restrictions": [{"schema_name": "consent schema"}],
+
+                })
+
+           
+
+            if SELF_ATTESTED:
+
+                # test self-attested claims
+
+                req_attrs.append(
+
+                    {"name": "self_attested_thing"},
+
+                )
+
+            req_preds = [
+
+                # test zero-knowledge proofs
+
+                {
+
+                    "name": "consent",
+
+                    "p_type": ">",
+
+                    "p_value": int("0"),
+
+                    "restrictions": [{"schema_name": "consent schema"}],
+
+                }
+
+            ]
+
+            #proof in the wallet
+
+            indy_proof_request = {
+
+                "name": "Proof of Consent",
+
+                "version": "1.0",
+
+                "requested_attributes": {
+
+                    f"0_{req_attr['name']}_uuid": req_attr for req_attr in req_attrs
+
+                },
+
+                "requested_predicates": {
+
+                    f"0_{req_pred['name']}_GE_uuid": req_pred for req_pred in req_preds
+
+                },
+
+            }
+
+ 
+
+            if revocation:
+
+                indy_proof_request["non_revoked"] = {"to": int(time.time())}
+
+ 
+
+            proof_request_web_request = {
+
+                "proof_request": indy_proof_request,
+
+                "trace": exchange_tracing,
+
+            }
+
+            if not connectionless:
+
+                proof_request_web_request["connection_id"] = self.connection_id
+
+            return proof_request_web_request
+
+ 
+
+        elif aip == 20:
+
+            if cred_type == CRED_FORMAT_INDY:
+
+                if revocation:
+
+                    req_attrs=[
+
+                        {
+
+                            "name": "consent",
+
+                            "restrictions": [{"schema_name": "consent schema"}],
+
+                            "non_revoked": {"to": int(time.time() - 1)},
+
+                        },
+
+                    ]
+
+                else:
+
+                    req_attrs = [
+
+                    {
+
+                        "name": "consent",
+
+                        "restrictions": [{"schema_name": "consent schema"}],
+
+                    }
+
+                ]
+
+                req_attrs.append(
+
+                {
+
+                    "name": "patient_ref",
+
+                    "restrictions": [{"schema_name": "consent schema"}],
+
+                })
+
+                req_attrs.append(
+
+                {
+
+                    "name": "medical_ref",
+
+                    "restrictions": [{"schema_name": "consent schema"}],
+
+                })
+
+                   
+
+                if SELF_ATTESTED:
+
+                    # test self-attested claims
+
+                    req_attrs.append(
+
+                        {"name": "self_attested_thing"},
+
+                    )
+
+                req_preds = [
+
+                    # test zero-knowledge proofs
+
+                    {
+
+                        "name": "consent",
+
+                        "p_type": ">",
+
+                        "p_value": int("0"),
+
+                        "restrictions": [{"schema_name": "consent schema"}],
+
+                    }
+
+                ]
+
+                indy_proof_request = {
+
+                    "name": "Proof of Consent",
+
+                    "version": "1.0",
+
+                    "requested_attributes": {
+
+                        f"0_{req_attr['name']}_uuid": req_attr for req_attr in req_attrs
+
+                    },
+
+                    "requested_predicates": {
+
+                        f"0_{req_pred['name']}_GE_uuid": req_pred
+
+                        for req_pred in req_preds
+
+                    },
+
+                }
+
+ 
+
+                if revocation:
+
+                    indy_proof_request["non_revoked"] = {"to": int(time.time())}
+
+ 
+
+                proof_request_web_request = {
+
+                    "presentation_request": {"indy": indy_proof_request},
+
+                    "trace": exchange_tracing,
+
+                }
+
+                if not connectionless:
+
+                    proof_request_web_request["connection_id"] = self.connection_id
+
+                return proof_request_web_request
+
+ 
+
+            elif cred_type == CRED_FORMAT_JSON_LD:
+
+                proof_request_web_request = {
+
+                    "comment": "test proof request for json-ld",
+
+                    "presentation_request": {
+
+                        "dif": {
+
+                            "options": {
+
+                                "challenge": "3fa85f64-5717-4562-b3fc-2c963f66afa7",
+
+                                "domain": "4jt78h47fh47",
+
+                            },
+
+                            "presentation_definition": {
+
+                                "id": "32f54163-7166-48f1-93d8-ff217bdb0654",
+
+                                "format": {"ldp_vp": {"proof_type": [SIG_TYPE_BLS]}},
+
+                                "input_descriptors": [
+
+                                    {
+
+                                        "id": "citizenship_input_1",
+
+                                        "name": "EU Driver's License",
+
+                                        "schema": [
+
+                                            {
+
+                                                "uri": "https://www.w3.org/2018/credentials#VerifiableCredential"
+
+                                            },
+
+                                            {
+
+                                                "uri": "https://w3id.org/citizenship#PermanentResident"
+
+                                            },
+
+                                        ],
+
+                                        "constraints": {
+
+                                            "limit_disclosure": "required",
+
+                                            "is_holder": [
+
+                                                {
+
+                                                    "directive": "required",
+
+                                                    "field_id": [
+
+                                                        "1f44d55f-f161-4938-a659-f8026467f126"
+
+                                                    ],
+
+                                                }
+
+                                            ],
+
+                                            "fields": [
+
+                                                {
+
+                                                    "id": "1f44d55f-f161-4938-a659-f8026467f126",
+
+                                                    "path": [
+
+                                                        "$.credentialSubject.familyName"
+
+                                                    ],
+
+                                                    "purpose": "The claim must be from one of the specified person",
+
+                                                    "filter": {"const": "SMITH"},
+
+                                                },
+
+                                                {
+
+                                                    "path": [
+
+                                                        "$.credentialSubject.givenName"
+
+                                                    ],
+
+                                                    "purpose": "The claim must be from one of the specified person",
+
+                                                },
+
+                                            ],
+
+                                        },
+
+                                    }
+
+                                ],
+
+                            },
+
+                        }
+
+                    },
+
+                }
+
+                if not connectionless:
+
+                    proof_request_web_request["connection_id"] = self.connection_id
+
+                return proof_request_web_request
+
+ 
+
+            else:
+
+                raise Exception(f"Error invalid credential type: {self.cred_type}")
+
+ 
+
+        else:
+
+            raise Exception(f"Error invalid AIP level: {self.aip}")
+
+ 
+
+    ######################
 
  
 
@@ -344,6 +764,8 @@ async def main(args):
 
             tails_server_base_url=centerMed_agent.tails_server_base_url,
 
+            revocation=centerMed_agent.revocation,
+
             timing=centerMed_agent.show_timing,
 
             multitenant=centerMed_agent.multitenant,
@@ -354,71 +776,69 @@ async def main(args):
 
             seed=centerMed_agent.seed,
 
-        )
+            aip=centerMed_agent.aip,
 
- 
-
-        centerMed_agent.public_did = True
-
-        # centerMed_schema_name = "employee id schema"
-
-        # centerMed_schema_attrs = ["employee_id", "name", "date", "position"]
-
-        await centerMed_agent.initialize(
-
-            the_agent=agent,
-
-            # schema_name=centerMed_schema_name,
-
-            # schema_attrs=centerMed_schema_attrs,
+            endorser_role=centerMed_agent.endorser_role,
 
         )
 
  
 
-        with log_timer("Publish schema and cred def duration:"):
+        patient_schema_name = "consent schema"
 
-            # define schema
+        patient_schema_attrs = [
 
-            version = format(
+            "patient_ref",
 
-                "%d.%d.%d"
+            "medical_ref",
 
-                % (
+            "consent",
 
-                    random.randint(1, 101),
+        ]
 
-                    random.randint(1, 101),
+        if centerMed_agent.cred_type == CRED_FORMAT_INDY:
 
-                    random.randint(1, 101),
+            centerMed_agent.public_did = True
 
-                )
+            await centerMed_agent.initialize(
 
-            )
+                the_agent=agent,
 
-            # register schema and cred def
+                schema_name=patient_schema_name,
 
-            (schema_id, cred_def_id) = await agent.register_schema_and_creddef(
+                schema_attrs=patient_schema_attrs,
 
-                "employee id schema",
+                create_endorser_agent=(centerMed_agent.endorser_role == "author")
 
-                version,
+                if centerMed_agent.endorser_role
 
-                ["employee_id", "name", "date", "position"],
-
-                support_revocation=False,
-
-                revocation_registry_size=TAILS_FILE_COUNT,
+                else False,
 
             )
+
+        elif centerMed_agent.cred_type == CRED_FORMAT_JSON_LD:
+
+            centerMed_agent.public_did = True
+
+            await centerMed_agent.initialize(the_agent=agent)
+
+        else:
+
+            raise Exception("Invalid credential type:" + centerMed_agent.cred_type)
 
  
 
         # generate an invitation for Alice
 
-        await centerMed_agent.generate_invitation(display_qr=True, wait=True)
+        await centerMed_agent.generate_invitation(
+
+            display_qr=True, reuse_connections=centerMed_agent.reuse_connections, wait=True
+
+        )
 
  
+
+        exchange_tracing = False
 
         options = (
 
@@ -426,11 +846,33 @@ async def main(args):
 
             "    (2) Send Proof Request\n"
 
+            "    (2a) Send *Connectionless* Proof Request (requires a Mobile client)\n"
+
             "    (3) Send Message\n"
 
-            "    (X) Exit?\n"
+            "    (4) Create New Invitation\n"
 
-            "[1/2/3/X]"
+        )
+
+        if centerMed_agent.revocation:
+
+            options += "    (5) Revoke Credential\n" "    (6) Publish Revocations\n"
+
+        if centerMed_agent.endorser_role and centerMed_agent.endorser_role == "author":
+
+            options += "    (D) Set Endorser's DID\n"
+
+        if centerMed_agent.multitenant:
+
+            options += "    (W) Create and/or Enable Wallet\n"
+
+        options += "    (T) Toggle tracing on credential/proof exchange\n"
+
+        options += "    (X) Exit?\n[1/2/3/4/{}{}T/X] ".format(
+
+            "5/6/" if centerMed_agent.revocation else "",
+
+            "W/" if centerMed_agent.multitenant else "",
 
         )
 
@@ -448,143 +890,441 @@ async def main(args):
 
  
 
-            elif option == "1":
+            elif option in "dD" and centerMed_agent.endorser_role:
 
-                log_status("#13 Issue credential offer to X")
+                endorser_did = await prompt("Enter Endorser's DID: ")
 
-                agent.cred_attrs[cred_def_id] = {
+                await centerMed_agent.agent.admin_POST(
 
-                    "employee_id": "ACME0009",
+                    f"/transactions/{centerMed_agent.agent.connection_id}/set-endorser-info",
 
-                    "name": "Alice Smith",
-
-                    "date": date.isoformat(date.today()),
-
-                    "position": "CEO"
-
-                }
-
-                cred_preview = {
-
-                    "@type": CRED_PREVIEW_TYPE,
-
-                    "attributes": [
-
-                        {"name": n, "value": v}
-
-                        for (n, v) in agent.cred_attrs[cred_def_id].items()
-
-                    ],
-
-                }
-
-                offer_request = {
-
-                    "connection_id": agent.connection_id,
-
-                    "comment": f"Offer on cred def id {cred_def_id}",
-
-                    "credential_preview": cred_preview,
-
-                    "filter": {"indy": {"cred_def_id": cred_def_id}},
-
-                }
-
-                await agent.admin_POST(
-
-                    "/issue-credential-2.0/send-offer", offer_request
+                    params={"endorser_did": endorser_did},
 
                 )
 
  
 
-            elif option == "2":
+            elif option in "wW" and centerMed_agent.multitenant:
 
-                log_status("#20 Request proof of consent from alice")
+                target_wallet_name = await prompt("Enter wallet name: ")
 
-                req_attrs = [
+                include_subwallet_webhook = await prompt(
 
-                    {
-
-                        "name": "patient_ref",
-
-                        "restrictions": [{"schema_name": "consent schema"}]
-
-                    },
-
-                    {
-
-                        "name": "medical_ref",
-
-                        "restrictions": [{"schema_name": "consent schema"}]
-
-                    },
-
-                    {
-
-                        "name": "consent",
-
-                        "restrictions": [{"schema_name": "consent schema"}]
-
-                    }
-
-                ]
-
-                req_preds = [
-
-                    {
-
-                    "name": "consent",
-
-                    "f_type": "==",
-
-                    "f_value": "True",
-
-                    "restrictions": [{"schema_name": "consent schema"}],
-
-                }
-
-                ]
-
-                indy_proof_request = {
-
-                    "name": "Proof of Consent",
-
-                    "version": "1.0",
-
-                    "nonce": str(uuid4().int),
-
-                    "requested_attributes": {
-
-                        f"0_{req_attr['name']}_uuid": req_attr
-
-                        for req_attr in req_attrs
-
-                    },
-
-                    "requested_predicates": {}
-
-                }
-
-                proof_request_web_request = {
-
-                    "connection_id": agent.connection_id,
-
-                    "presentation_request": {"indy": indy_proof_request},
-
-                }
-
-                # this sends the request to our agent, which forwards it to Alice
-
-                # (based on the connection_id)
-
-                await agent.admin_POST(
-
-                    "/present-proof-2.0/send-request",
-
-                    proof_request_web_request
+                    "(Y/N) Create sub-wallet webhook target: "
 
                 )
+
+                if include_subwallet_webhook.lower() == "y":
+
+                    created = await centerMed_agent.agent.register_or_switch_wallet(
+
+                        target_wallet_name,
+
+                        webhook_port=centerMed_agent.agent.get_new_webhook_port(),
+
+                        public_did=True,
+
+                        mediator_agent=centerMed_agent.mediator_agent,
+
+                        endorser_agent=centerMed_agent.endorser_agent,
+
+                        taa_accept=centerMed_agent.taa_accept,
+
+                    )
+
+                else:
+
+                    created = await centerMed_agent.agent.register_or_switch_wallet(
+
+                        target_wallet_name,
+
+                        public_did=True,
+
+                        mediator_agent=centerMed_agent.mediator_agent,
+
+                        endorser_agent=centerMed_agent.endorser_agent,
+
+                        cred_type=centerMed_agent.cred_type,
+
+                        taa_accept=centerMed_agent.taa_accept,
+
+                    )
+
+                # create a schema and cred def for the new wallet
+
+                # TODO check first in case we are switching between existing wallets
+
+                if created:
+
+                    # TODO this fails because the new wallet doesn't get a public DID
+
+                    await centerMed_agent.create_schema_and_cred_def(
+
+                        schema_name=patient_schema_name,
+
+                        schema_attrs=patient_schema_attrs,
+
+                    )
+
+ 
+
+            elif option in "tT":
+
+                exchange_tracing = not exchange_tracing
+
+                log_msg(
+
+                    ">>> Credential/Proof Exchange Tracing is {}".format(
+
+                        "ON" if exchange_tracing else "OFF"
+
+                    )
+
+                )
+
+ 
+
+            elif option == "1":
+
+                log_status("#13 Issue credential offer to X")
+
+ 
+
+                if centerMed_agent.aip == 10:
+
+                    offer_request = centerMed_agent.agent.generate_credential_offer(
+
+                        centerMed_agent.aip, None, centerMed_agent.cred_def_id, exchange_tracing
+
+                    )
+
+                    await centerMed_agent.agent.admin_POST(
+
+                        "/issue-credential/send-offer", offer_request
+
+                    )
+
+ 
+
+                elif centerMed_agent.aip == 20:
+
+                    if centerMed_agent.cred_type == CRED_FORMAT_INDY:
+
+                        offer_request = centerMed_agent.agent.generate_credential_offer(
+
+                            centerMed_agent.aip,
+
+                            centerMed_agent.cred_type,
+
+                            centerMed_agent.cred_def_id,
+
+                            exchange_tracing,
+
+                        )
+
+ 
+
+                    elif centerMed_agent.cred_type == CRED_FORMAT_JSON_LD:
+
+                        offer_request = centerMed_agent.agent.generate_credential_offer(
+
+                            centerMed_agent.aip,
+
+                            centerMed_agent.cred_type,
+
+                            None,
+
+                            exchange_tracing,
+
+                        )
+
+ 
+
+                    else:
+
+                        raise Exception(
+
+                            f"Error invalid credential type: {centerMed_agent.cred_type}"
+
+                        )
+
+ 
+
+                    await centerMed_agent.agent.admin_POST(
+
+                        "/issue-credential-2.0/send-offer", offer_request
+
+                    )
+
+ 
+
+                else:
+
+                    raise Exception(f"Error invalid AIP level: {centerMed_agent.aip}")
+
+ 
+
+            elif option == "2":
+
+                log_status("#20 Request proof of degree from alice")
+
+                if centerMed_agent.aip == 10:
+
+                    proof_request_web_request = (
+
+                        centerMed_agent.agent.generate_proof_request_web_request(
+
+                            centerMed_agent.aip,
+
+                            centerMed_agent.cred_type,
+
+                            centerMed_agent.revocation,
+
+                            exchange_tracing,
+
+                        )
+
+                    )
+
+                    await centerMed_agent.agent.admin_POST(
+
+                        "/present-proof/send-request", proof_request_web_request
+
+                    )
+
+                    pass
+
+ 
+
+                elif centerMed_agent.aip == 20:
+
+                    if centerMed_agent.cred_type == CRED_FORMAT_INDY:
+
+                        proof_request_web_request = (
+
+                            centerMed_agent.agent.generate_proof_request_web_request(
+
+                                centerMed_agent.aip,
+
+                                centerMed_agent.cred_type,
+
+                                centerMed_agent.revocation,
+
+                                exchange_tracing,
+
+                            )
+
+                        )
+
+ 
+
+                    elif centerMed_agent.cred_type == CRED_FORMAT_JSON_LD:
+
+                        proof_request_web_request = (
+
+                            centerMed_agent.agent.generate_proof_request_web_request(
+
+                                centerMed_agent.aip,
+
+                                centerMed_agent.cred_type,
+
+                                centerMed_agent.revocation,
+
+                                exchange_tracing,
+
+                            )
+
+                        )
+
+ 
+
+                    else:
+
+                        raise Exception(
+
+                            "Error invalid credential type:" + centerMed_agent.cred_type
+
+                        )
+
+ 
+
+                    await agent.admin_POST(
+
+                        "/present-proof-2.0/send-request", proof_request_web_request
+
+                    )
+
+ 
+
+                else:
+
+                    raise Exception(f"Error invalid AIP level: {centerMed_agent.aip}")
+
+ 
+
+            elif option == "2a":
+
+                log_status("#20 Request * Connectionless * proof of degree from alice")
+
+                if centerMed_agent.aip == 10:
+
+                    proof_request_web_request = (
+
+                        centerMed_agent.agent.generate_proof_request_web_request(
+
+                            centerMed_agent.aip,
+
+                            centerMed_agent.cred_type,
+
+                            centerMed_agent.revocation,
+
+                            exchange_tracing,
+
+                            connectionless=True,
+
+                        )
+
+                    )
+
+                    proof_request = await centerMed_agent.agent.admin_POST(
+
+                        "/present-proof/create-request", proof_request_web_request
+
+                    )
+
+                    pres_req_id = proof_request["presentation_exchange_id"]
+
+                    url = (
+
+                        os.getenv("WEBHOOK_TARGET")
+
+                        or (
+
+                            "http://"
+
+                            + os.getenv("DOCKERHOST").replace(
+
+                                "{PORT}", str(centerMed_agent.agent.admin_port + 1)
+
+                            )
+
+                            + "/webhooks"
+
+                        )
+
+                    ) + f"/pres_req/{pres_req_id}/"
+
+                    log_msg(f"Proof request url: {url}")
+
+                    qr = QRCode(border=1)
+
+                    qr.add_data(url)
+
+                    log_msg(
+
+                        "Scan the following QR code to accept the proof request from a mobile agent."
+
+                    )
+
+                    qr.print_ascii(invert=True)
+
+ 
+
+                elif centerMed_agent.aip == 20:
+
+                    if centerMed_agent.cred_type == CRED_FORMAT_INDY:
+
+                        proof_request_web_request = (
+
+                            centerMed_agent.agent.generate_proof_request_web_request(
+
+                                centerMed_agent.aip,
+
+                                centerMed_agent.cred_type,
+
+                                centerMed_agent.revocation,
+
+                                exchange_tracing,
+
+                                connectionless=True,
+
+                            )
+
+                        )
+
+                    elif centerMed_agent.cred_type == CRED_FORMAT_JSON_LD:
+
+                        proof_request_web_request = (
+
+                            centerMed_agent.agent.generate_proof_request_web_request(
+
+                                centerMed_agent.aip,
+
+                                centerMed_agent.cred_type,
+
+                                centerMed_agent.revocation,
+
+                                exchange_tracing,
+
+                                connectionless=True,
+
+                            )
+
+                        )
+
+                    else:
+
+                        raise Exception(
+
+                            "Error invalid credential type:" + centerMed_agent.cred_type
+
+                        )
+
+ 
+
+                    proof_request = await centerMed_agent.agent.admin_POST(
+
+                        "/present-proof-2.0/create-request", proof_request_web_request
+
+                    )
+
+                    pres_req_id = proof_request["pres_ex_id"]
+
+                    url = (
+
+                        "http://"
+
+                        + os.getenv("DOCKERHOST").replace(
+
+                            "{PORT}", str(centerMed_agent.agent.admin_port + 1)
+
+                        )
+
+                        + "/webhooks/pres_req/"
+
+                        + pres_req_id
+
+                        + "/"
+
+                    )
+
+                    log_msg(f"Proof request url: {url}")
+
+                    qr = QRCode(border=1)
+
+                    qr.add_data(url)
+
+                    log_msg(
+
+                        "Scan the following QR code to accept the proof request from a mobile agent."
+
+                    )
+
+                    qr.print_ascii(invert=True)
+
+                else:
+
+                    raise Exception(f"Error invalid AIP level: {centerMed_agent.aip}")
 
  
 
@@ -592,11 +1332,109 @@ async def main(args):
 
                 msg = await prompt("Enter message: ")
 
-                await agent.admin_POST(
+                await centerMed_agent.agent.admin_POST(
 
-                    f"/connections/{agent.connection_id}/send-message", {"content": msg}
+                    f"/connections/{centerMed_agent.agent.connection_id}/send-message",
+
+                    {"content": msg},
 
                 )
+
+ 
+
+            elif option == "4":
+
+                log_msg(
+
+                    "Creating a new invitation, please receive "
+
+                    "and accept this invitation using Alice agent"
+
+                )
+
+                await centerMed_agent.generate_invitation(
+
+                    display_qr=True,
+
+                    reuse_connections=centerMed_agent.reuse_connections,
+
+                    wait=True,
+
+                )
+
+ 
+
+            elif option == "5" and centerMed_agent.revocation:
+
+                rev_reg_id = (await prompt("Enter revocation registry ID: ")).strip()
+
+                cred_rev_id = (await prompt("Enter credential revocation ID: ")).strip()
+
+                publish = (
+
+                    await prompt("Publish now? [Y/N]: ", default="N")
+
+                ).strip() in "yY"
+
+                try:
+
+                    await centerMed_agent.agent.admin_POST(
+
+                        "/revocation/revoke",
+
+                        {
+
+                            "rev_reg_id": rev_reg_id,
+
+                            "cred_rev_id": cred_rev_id,
+
+                            "publish": publish,
+
+                            "connection_id": centerMed_agent.agent.connection_id,
+
+                            # leave out thread_id, let aca-py generate
+
+                            # "thread_id": "12345678-4444-4444-4444-123456789012",
+
+                            "comment": "Revocation reason goes here ...",
+
+                        },
+
+                    )
+
+                except ClientError:
+
+                    pass
+
+ 
+
+            elif option == "6" and centerMed_agent.revocation:
+
+                try:
+
+                    resp = await centerMed_agent.agent.admin_POST(
+
+                        "/revocation/publish-revocations", {}
+
+                    )
+
+                    centerMed_agent.agent.log(
+
+                        "Published revocations for {} revocation registr{} {}".format(
+
+                            len(resp["rrid2crid"]),
+
+                            "y" if len(resp["rrid2crid"]) == 1 else "ies",
+
+                            json.dumps([k for k in resp["rrid2crid"]], indent=4),
+
+                        )
+
+                    )
+
+                except ClientError:
+
+                    pass
 
  
 
@@ -630,7 +1468,7 @@ async def main(args):
 
 if __name__ == "__main__":
 
-    parser = arg_parser(ident="centerMed", port=8040)
+    parser = arg_parser(ident="centerMed", port=8020)
 
     args = parser.parse_args()
 
@@ -689,10 +1527,6 @@ if __name__ == "__main__":
         except ImportError:
 
             print("pydevd_pycharm library was not found")
-
- 
-
-    check_requires(args)
 
  
 
